@@ -27,6 +27,7 @@ TOKEN_URL             = os.environ["TOKEN_URL"]
 CRM_URL               = os.environ["CRM_URL"]
 SENDER_EMAIL          = os.environ["SENDER_EMAIL"]
 ALERT_EMAIL           = os.environ["ALERT_EMAIL"]
+CRM_DEV_URL           = os.environ["CRM_DEV_URL"]
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -328,26 +329,41 @@ def parse_body(body_content: str) -> dict:
 # ── CRM integration ───────────────────────────────────────────────────────────
 
 def send_to_crm(payload: dict, dequeue_count: int):
+    # Get token once, used for both calls
     try:
         token = get_crm_token()
-        res = requests.post(
-            CRM_URL,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=30,
-        )
+    except Exception as e:
+        logger.exception("Failed to get CRM token")
+        if dequeue_count >= 2:
+            send_failure_email(payload, str(e))
+        raise  # Still retry via Azure
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    try:
+        res = requests.post(CRM_URL, headers=headers, json=payload, timeout=30)
         logger.info(f"CRM response: {res.status_code} — {res.text}")
         res.raise_for_status()
-        logger.info("Lead sent to CRM successfully")
+        logger.info("Lead sent to CRM (prod) successfully")
 
-    # except requests.exceptions.RequestException as e:
     except Exception as e:
         body_text = e.response.text if hasattr(e, "response") and e.response else ""
         full_error = f"{e} | CRM Response: {body_text}"
-        logger.error(f"CRM send failed: {full_error}")
-        if dequeue_count >= 2: 
+        logger.error(f"Prod CRM send failed: {full_error}")
+        if dequeue_count >= 2:
             send_failure_email(payload, full_error)
-        raise  # Re-raise so the queue message gets retried by Azure
+        raise  # Re-raise so Azure retries the queue message
+
+    try:
+        res_dev = requests.post(CRM_DEV_URL, headers=headers, json=payload, timeout=30)
+        logger.info(f"Dev CRM response: {res_dev.status_code} — {res_dev.text}")
+        res_dev.raise_for_status()
+        logger.info("Lead sent to Dev CRM successfully")
+
+    except Exception as e:
+        body_text = e.response.text if hasattr(e, "response") and e.response else ""
+        logger.error(f"Dev CRM send failed (no alert, no retry): {e} | CRM Response: {body_text}")
+        
 
 # ── Failure alert email ───────────────────────────────────────────────────────
 
